@@ -98,7 +98,7 @@ class BossEventPacket extends DataPacket{
 				$this->putShort($this->flags);
 			case self::TYPE_COLOUR:
 				$this->putUnsignedVarInt($this->unknownVarint1);
-				$this->putUnsignedVarInt($this->unknownVarint1);
+				$this->putUnsignedVarInt($this->unknownVarint2);
 				break;
 			default:
 				break;

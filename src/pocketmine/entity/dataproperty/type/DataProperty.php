@@ -33,6 +33,15 @@ abstract class DataProperty{
 	const DATA_TYPE = -1;
 
 	/**
+	 * @param mixed $value
+	 *
+	 * @throws \InvalidArgumentException
+	 */
+	public function __construct($value){
+		$this->setValue($value);
+	}
+
+	/**
 	 * Encodes the data property to binary.
 	 * @internal
 	 *

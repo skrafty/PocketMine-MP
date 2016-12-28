@@ -64,9 +64,25 @@ class EntityDataManager{
 		self::DATA_TYPE_VECTOR3F  => Vector3fDataProperty::class
 	];
 
-	private static $index = [
+	private static $propertyIndex = [
 		//TODO
 	];
+
+	/**
+	 * Returns a new property object with correct type and default value, or null if the key does not exist.
+	 * @since API 3.0.0
+	 *
+	 * @param int $key
+	 *
+	 * @return DataProperty|null
+	 */
+	public static function createProperty(int $key){
+		if(array_key_exists($key, self::$propertyIndex)){
+			return clone self::$propertyIndex[$key];
+		}
+
+		return null;
+	}
 
 	/** @var DataProperty */
 	private $dataProperties = [];
@@ -111,7 +127,7 @@ class EntityDataManager{
 	public function removeProperty(int $key){
 		if(array_key_exists($key, $this->dataProperties)){
 			unset($this->dataProperties[$key]);
-			$this->updateProperties[$key] = clone self::$propertyIndex[$key]; //Send original default to override previously set properties
+			$this->updateProperties[$key] = self::createProperty($key); //Send original default to override previously set properties
 		}
 	}
 

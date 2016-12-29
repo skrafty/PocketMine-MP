@@ -25,19 +25,29 @@ namespace pocketmine\entity\component;
 
 abstract class Component{
 	/** @var Entity */
-	protected $holder;
+	protected $entity;
 
-	public function __construct(Entity $holder){
-		$this->holder = $holder;
+	public function __construct(Entity $entity){
+		$this->entity = $entity;
 	}
 
 	public function getEntity() : Entity{
 		return $this->holder;
 	}
 
-	public function onInteract(){}
+	public function onUpdate(int $tickDiff = 1) : bool{
+		return false;
+	}
 
-	public function onAttack(){}
+	public function onInteract(Entity $source = null) : bool{
+		return false;
+	}
 
-	public function onMouseover(){}
+	public function onAttack(Entity $source = null) : bool{
+		return false;
+	}
+
+	public function onMouseover(Entity $source = null) : bool{
+		return false;
+	}
 }

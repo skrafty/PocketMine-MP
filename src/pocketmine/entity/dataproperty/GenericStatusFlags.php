@@ -58,6 +58,8 @@ interface GenericStatusFlags{
 	const BREATHING = 30;
 	const CHESTED = 31;
 	const STACKABLE = 32;
-
+	const SHOWBASE = 33;
+	const REARING = 34;
+	const VIBRATING = 35;
 	const IDLING = 36;
 }

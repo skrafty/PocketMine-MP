@@ -33,8 +33,11 @@ use pocketmine\level\format\Chunk;
 use pocketmine\level\format\generic\GenericChunk;
 use pocketmine\level\Level;
 use pocketmine\math\Vector3;
-use pocketmine\network\protocol\ChangeDimensionPacket;
-use pocketmine\network\protocol\DataPacket;
+use pocketmine\network\protocol\{
+	ChangeDimensionPacket,
+	DataPacket,
+	LevelEventPacket
+};
 use pocketmine\Player;
 use pocketmine\Server;
 use pocketmine\tile\Tile;
@@ -244,6 +247,7 @@ abstract class Dimension{
 	 * @return int
 	 */
 	final public function getMaxBuildHeight() : int{
+		//TODO: add world/dimension height options (?)
 		return $this->dimensionType->getMaxBuildHeight();
 	}
 
@@ -427,7 +431,7 @@ abstract class Dimension{
 		$chunk = $this->getChunk($pos->x >> 4, $pos->z >> 4, false);
 
 		if($chunk !== null){
-			return $chunk->getTile($pos->x & 0x0f, $pos->y & Level::Y_MASK, $pos->z & 0x0f);
+			return $chunk->getTile($pos->x & 0x0f, $pos->y, $pos->z & 0x0f);
 		}
 
 		return null;
@@ -475,6 +479,464 @@ abstract class Dimension{
 		}
 
 		return null;
+	}
+
+	/**
+	 * Returns the block at the specified Vector3 position in this dimension
+	 * @since API 3.0.0
+	 *
+	 * @param Vector3 $pos
+	 * @param bool    $useCache
+	 * @param bool    $shouldCache
+	 *
+	 * @return Block
+	 */
+	public function getBlock(Vector3 $pos, bool $useCache = true, bool $shouldCache = true) : Block{
+		$pos = $pos->floor();
+		return $this->getBlockAt($pos->x, $pos->y, $pos->z, $useCache, $shouldCache);
+	}
+
+	/**
+	 * Returns the block at the specified coordinates
+	 * @since API 3.0.0
+	 *
+	 * @param int  $x
+	 * @param int  $y
+	 * @param int  $z
+	 * @param bool $useCache
+	 * @param bool $shouldCache Whether to cache the created block object if it is not already
+	 *
+	 * @return Block
+	 */
+	public function getBlockAt(int $x, int $y, int $z, bool $useCache = true, bool $shouldCache = true) : Block{
+		if($y < 0 or $y > $this->getMaxBuildHeight()){
+			return clone Block::$fullList[0]; //outside Y coordinate range, don't try to hash coords or bother caching
+		}
+
+		$fullState = 0; //Default to air
+
+		$index = Level::blockHash($x, $y, $z);
+		if($useCache and isset($this->blockCache[$index])){
+			return $this->blockCache[$index];
+		}elseif(isset($this->chunks[$chunkIndex = Level::chunkHash($pos->x >> 4, $pos->z >> 4)])){
+			$fullState = $this->chunks[$chunkIndex]->getFullBlock($x & 0x0f, $y, $z & 0x0f);
+		}
+
+		$block = clone Block::$fullList[$fullState & 0xfff];
+
+		$block->x = $x;
+		$block->y = $y;
+		$block->z = $z;
+		$block->level = $this->level;
+		$block->dimensionId = $this->saveId;
+
+		if($shouldCache){
+			assert(count($this->blockCache) <= 2048, "Block cache exceeded 2048 entries, is something abusing getBlock()?");
+			$this->blockCache[$index] = $block;
+		}
+
+		return $block;
+	}
+
+	/**
+	 * Returns an integer bitmap containing the id and damage of the block at the specified position.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 *
+	 * @return int bitmap, (id << 4) | data
+	 */
+	public function getFullBlock(int $x, int $y, int $z) : int{
+		return $this->getChunk($x >> 4, $z >> 4, false)->getFullBlock($x & 0x0f, $y, $z & 0x0f);
+	}
+
+	/**
+	 * Wrapper for setBlockAt() which accepts a Vector3 parameter for the position.
+	 * @since API 3.0.0
+	 *
+	 * @param Vector3 $pos
+	 * @param Block   $block
+	 * @param bool    $direct @deprecated
+	 * @param bool    $update
+	 *
+	 * @return bool
+	 */
+	public function setBlock(Vector3 $pos, Block $block, bool $direct = false, bool $update = true) : bool{
+		$pos = $pos->floor();
+		return $this->setBlockAt($pos->x, $pos->y, $pos->z, $block, $direct, $update);
+	}
+
+	/**
+	 * Sets data from a Block object to the specified position, does block updates and adds the changes to the send queue.
+	 *
+	 * If $direct is true, it'll send changes directly to players. if false, it'll be queued
+	 * and the best way to send queued changes will be done in the next tick.
+	 * This way big changes can be sent in a single chunk update packet instead of thousands of packets.
+	 *
+	 * If $update is true, it'll get the neighbour blocks (6 sides) and update them.
+	 * If you are doing big changes, you might want to set this to false, then update manually.
+	 *
+	 * @since API 3.0.0
+	 *
+	 * @param int   $x
+	 * @param int   $y
+	 * @param int   $z
+	 * @param Block $block
+	 * @param bool  $direct @deprecated
+	 * @param bool  $update
+	 *
+	 * @return bool if changes were made
+	 */
+	public function setBlockAt(int $x, int $y, int $z, Block $block, bool $direct = false, bool $update = true) : bool{
+		if($y < 0 or $y > $this->getMaxBuildHeight()){
+			return false; //outside Y coordinate range
+		}
+
+		if($this->getChunk($x >> 4, $z >> 4, true)->setBlock($x & 0x0f, $y, $z & 0x0f, $block->getId(), $block->getDamage()) === true){
+			$block->x = $x;
+			$block->y = $y;
+			$block->z = $z;
+			$block->level = $this->level;
+			$block->dimensionId = $this->saveId;
+
+			unset($this->blockCache[$blockHash = Level::blockHash($x, $y, $z)]);
+
+			$chunkHash = Level::chunkHash($x >> 4, $z >> 4);
+
+			if($direct === true){
+				$this->sendBlocks($this->getChunkPlayers($x >> 4, $z >> 4), [$block], UpdateBlockPacket::FLAG_ALL_PRIORITY);
+				unset($this->chunkCache[$chunkHash]);
+			}else{
+				if(!isset($this->changedBlocks[$chunkHash])){
+					$this->changedBlocks[$chunkHash] = [];
+				}
+
+				$this->changedBlocks[$chunkHash][$blockHash] = clone $block;
+			}
+
+			foreach($this->getChunkLoaders($x >> 4, $z >> 4) as $loader){
+				$loader->onBlockChanged($block);
+			}
+
+			if($update === true){
+				$this->updateAllLight($block);
+
+				$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($block));
+				if(!$ev->isCancelled()){
+					$evBlock = $ev->getBlock();
+					foreach($this->getNearbyEntities(new AxisAlignedBB($evBlock->x - 1, $evBlock->y - 1, $evBlock->z - 1, $evBlock->x + 1, $evBlock->y + 1, $evBlock->z + 1)) as $entity){
+						$entity->scheduleUpdate();
+					}
+					$evBlock->onUpdate(self::BLOCK_UPDATE_NORMAL);
+					$this->updateBlocksAround($evBlock);
+				}
+			}
+
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
+	 * Returns the maximum lighting available at the specified Vector3 position.
+	 * @since API 3.0.0
+	 *
+	 * @return int 0-15
+	 */
+	public function getFullLight(Vector3 $pos) : int{
+		$pos = $pos->floor();
+		return $this->getFullLightAt($pos->x, $pos->y, $pos->z);
+	}
+
+	/**
+	 * Returns the maximum available lighting at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 *
+	 * @return int 0-15
+	 */
+	public function getFullLightAt(int $x, int $y, int $z) : int{
+		$chunk = $this->getChunk($x >> 4, $z >> 4, false);
+		if($chunk !== null){
+			if($this->dimensionType->hasSkyLight()){
+				return max($chunk->getBlockSkyLight($x & 0x0f, $y, $z & 0x0f), $chunk->getBlockLight($x & 0x0f, $y, $z & 0x0f));
+			}else{
+				return $chunk->getBlockLight($x & 0x0f, $y, $z & 0x0f);
+			}
+		}
+
+		return 15;
+	}
+
+	/**
+	 * Returns the ID of the block at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 *
+	 * @return int 0-255
+	 */
+	public function getBlockIdAt(int $x, int $y, int $z) : int{
+		return $this->getChunk($x >> 4, $z >> 4, true)->getBlockId($x & 0x0f, $y, $z & 0x0f);
+	}
+
+	/**
+	 * Sets the raw block ID at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 * @param int $id 0-255
+	 */
+	public function setBlockIdAt(int $x, int $y, int $z, int $id){
+		$this->getChunk($x >> 4, $z >> 4, true)->setBlockId($x & 0x0f, $y, $z & 0x0f, $id & 0xff);
+		unset($this->blockCache[Level::blockHash($x, $y, $z)]);
+
+		if(!isset($this->changedBlocks[$index = Level::chunkHash($x >> 4, $z >> 4)])){
+			$this->changedBlocks[$index] = [];
+		}
+		$this->changedBlocks[$index][Level::blockHash($x, $y, $z)] = $v = new Vector3($x, $y, $z);
+		foreach($this->getChunkLoaders($x >> 4, $z >> 4) as $loader){
+			$loader->onBlockChanged($v);
+		}
+	}
+
+	/**
+	 * Returns the raw block meta value at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 *
+	 * @return int 0-15
+	 */
+	public function getBlockDataAt(int $x, int $y, int $z) : int{
+		return $this->getChunk($x >> 4, $z >> 4, true)->getBlockData($x & 0x0f, $y, $z & 0x0f);
+	}
+
+	/**
+	 * Sets the raw block meta value at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 * @param int $data 0-15
+	 */
+	public function setBlockDataAt(int $x, int $y, int $z, int $data){
+		$this->getChunk($x >> 4, $z >> 4, true)->setBlockData($x & 0x0f, $y, $z & 0x0f, $data & 0x0f);
+		unset($this->blockCache[Level::blockHash($x, $y, $z)]);
+		if(!isset($this->changedBlocks[$index = Level::chunkHash($x >> 4, $z >> 4)])){
+			$this->changedBlocks[$index] = [];
+		}
+
+		$this->changedBlocks[$index][Level::blockHash($x, $y, $z)] = $v = new Vector3($x, $y, $z);
+		foreach($this->getChunkLoaders($x >> 4, $z >> 4) as $loader){
+			$loader->onBlockChanged($v);
+		}
+	}
+
+	/**
+	 * Returns the raw block sky light level at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 *
+	 * @return int 0-15
+	 */
+	public function getBlockSkyLightAt(int $x, int $y, int $z) : int{
+		return $this->getChunk($x >> 4, $z >> 4, true)->getBlockSkyLight($x & 0x0f, $y, $z & 0x0f);
+	}
+
+	/**
+	 * Sets the raw block sky light level at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 * @param int $level 0-15
+	 */
+	public function setBlockSkyLightAt(int $x, int $y, int $z, int $level){
+		$this->getChunk($x >> 4, $z >> 4, true)->setBlockSkyLight($x & 0x0f, $y, $z & 0x0f, $level & 0x0f);
+	}
+
+	/**
+	 * Returns the raw block light level at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 *
+	 * @return int 0-15
+	 */
+	public function getBlockLightAt(int $x, int $y, int $z) : int{
+		return $this->getChunk($x >> 4, $z >> 4, true)->getBlockLight($x & 0x0f, $y, $z & 0x0f);
+	}
+
+	/**
+	 * Sets the raw block light level at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 * @param int $level 0-15
+	 */
+	public function setBlockLightAt(int $x, int $y, int $z, int $level){
+		$this->getChunk($x >> 4, $z >> 4, true)->setBlockLight($x & 0x0f, $y, $z & 0x0f, $level & 0x0f);
+	}
+
+	/**
+	 * Returns the biome ID of the X/Z column at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $z
+	 *
+	 * @return int
+	 */
+	public function getBiomeId(int $x, int $z) : int{
+		return $this->getChunk($x >> 4, $z >> 4, true)->getBiomeId($x & 0x0f, $z & 0x0f);
+	}
+
+	/**
+	 * Sets the biome ID of the X/Z column at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $z
+	 * @param int $biomeId
+	 */
+	public function setBiomeId(int $x, int $z, int $biomeId){
+		$this->getChunk($x >> 4, $z >> 4, true)->setBiomeId($x & 0x0f, $z & 0x0f, $biomeId);
+	}
+
+	/**
+	 * Returns the raw block extra data value at the specified coordinates.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 *
+	 * @return int 16-bit
+	 */
+	public function getBlockExtraDataAt(int $x, int $y, int $z) : int{
+		return $this->getChunk($x >> 4, $z >> 4, true)->getBlockExtraData($x & 0x0f, $y, $z & 0x0f);
+	}
+
+	/**
+	 * Sets the raw block extra data value at the specified coordinates. Changes the block seen inside the block, for example tall grass inside a snow layer.
+	 * This only works on a selection of blocks such as snow layers.
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $y
+	 * @param int $z
+	 * @param int $id
+	 * @param int $data
+	 */
+	public function setBlockExtraDataAt(int $x, int $y, int $z, int $id, int $data){
+		$this->getChunk($x >> 4, $z >> 4, true)->setBlockExtraData($x & 0x0f, $y, $z & 0x0f, ($data << 8) | $id);
+
+		$pk = new LevelEventPacket();
+		$pk->evid = LevelEventPacket::EVENT_SET_DATA;
+		$pk->x = $x + 0.5;
+		$pk->y = $y + 0.5;
+		$pk->z = $z + 0.5;
+		$pk->data = ($data << 8) | $id;
+
+		$this->addChunkPacket($x >> 4, $z >> 4, $pk);
+	}
+
+	/**
+	 * @internal
+	 *
+	 * @param int $x
+	 * @param int $z
+	 *
+	 * @return int
+	 */
+	public function getHeightMap(int $x, int $z) : int{
+		return $this->getChunk($x >> 4, $z >> 4, true)->getHeightMap($x & 0x0f, $z & 0x0f);
+	}
+
+	/**
+	 * @internal
+	 *
+	 * @param int $x
+	 * @param int $z
+	 * @param int $value
+	 */
+	public function setHeightMap(int $x, int $z, int $value){
+		$this->getChunk($x >> 4, $z >> 4, true)->setHeightMap($x & 0x0f, $z & 0x0f, $value);
+	}
+
+	/**
+	 * Returns the highest block Y value at the specified coordinates
+	 * @since API 3.0.0
+	 *
+	 * @param int $x
+	 * @param int $z
+	 *
+	 * @return int 0-255
+	 */
+	public function getHighestBlockAt(int $x, int $z) : int{
+		return $this->getChunk($x >> 4, $z >> 4, true)->getHighestBlockAt($x & 0x0f, $z & 0x0f);
+	}
+
+	/**
+	 * Updates blocks around a Vector3 position.
+	 * @since API 3.0.0
+	 *
+	 * @param Vector3 $pos
+	 */
+	public function updateBlocksAround(Vector3 $pos){
+		$pos = $pos->floor();
+
+		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y - 1, $pos->z)));
+		if(!$ev->isCancelled()){
+			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
+		}
+
+		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y + 1, $pos->z)));
+		if(!$ev->isCancelled()){
+			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
+		}
+
+		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x - 1, $pos->y, $pos->z)));
+		if(!$ev->isCancelled()){
+			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
+		}
+
+		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x + 1, $pos->y, $pos->z)));
+		if(!$ev->isCancelled()){
+			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
+		}
+
+		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y, $pos->z - 1)));
+		if(!$ev->isCancelled()){
+			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
+		}
+
+		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y, $pos->z + 1)));
+		if(!$ev->isCancelled()){
+			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
+		}
 	}
 
 	/**
@@ -551,14 +1013,14 @@ abstract class Dimension{
 	}
 
 	/**
-	 * Queues a DataPacket(s) to be sent to all players using the specified chunk on the next tick.
+	 * Queues a DataPacket to be sent to all players using the specified chunk on the next tick.
 	 * @internal
 	 *
 	 * @param int        $chunkX
 	 * @param int        $chunkZ
-	 * @param DataPacket $packets,...
+	 * @param DataPacket $packet
 	 */
-	public function addChunkPacket(int $x, int $z, ...$packets){
+	public function addChunkPacket(int $x, int $z, $packet){
 		if(!isset($this->chunkPackets[$index = Level::chunkHash($chunkX, $chunkZ)])){
 			$this->chunkPackets[$index] = [$packet];
 		}else{

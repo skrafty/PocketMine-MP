@@ -37,6 +37,7 @@ class Nether extends Generator{
 	private $populators = [];
 	/** @var ChunkManager */
 	private $level;
+	private $baseSeed;
 	/** @var Random */
 	private $random;
 	private $waterHeight = 32;
@@ -90,9 +91,9 @@ class Nether extends Generator{
 	public function init(ChunkManager $level, Random $random){
 		$this->level = $level;
 		$this->random = $random;
-		$this->random->setSeed($this->level->getSeed());
+		$this->baseSeed = $this->random->getSeed();
 		$this->noiseBase = new Simplex($this->random, 4, 1 / 4, 1 / 64);
-		$this->random->setSeed($this->level->getSeed());
+		$this->random->setSeed($this->baseSeed);
 
 		/*$ores = new Ore();
 		$ores->setOreTypes([
@@ -109,7 +110,7 @@ class Nether extends Generator{
 	}
 
 	public function generateChunk($chunkX, $chunkZ){
-		$this->random->setSeed(0xdeadbeef ^ ($chunkX << 8) ^ $chunkZ ^ $this->level->getSeed());
+		$this->random->setSeed(0xdeadbeef ^ ($chunkX << 8) ^ $chunkZ ^ $this->baseSeed);
 
 		$noise = Generator::getFastNoise3D($this->noiseBase, 16, 128, 16, 4, 8, 4, $chunkX * 16, 0, $chunkZ * 16);
 
@@ -144,7 +145,7 @@ class Nether extends Generator{
 	}
 
 	public function populateChunk($chunkX, $chunkZ){
-		$this->random->setSeed(0xdeadbeef ^ ($chunkX << 8) ^ $chunkZ ^ $this->level->getSeed());
+		$this->random->setSeed(0xdeadbeef ^ ($chunkX << 8) ^ $chunkZ ^ $this->baseSeed);
 		foreach($this->populators as $populator){
 			$populator->populate($this->level, $chunkX, $chunkZ, $this->random);
 		}

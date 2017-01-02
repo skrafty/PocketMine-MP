@@ -21,19 +21,21 @@
 
 namespace pocketmine\level\generator;
 
-use pocketmine\level\Level;
+use pocketmine\level\dimension\Dimension;
 use pocketmine\scheduler\AsyncTask;
 
 class GeneratorUnregisterTask extends AsyncTask{
 
 	public $levelId;
+	public $dimensionId;
 
-	public function __construct(Level $level){
-		$this->levelId = $level->getId();
+	public function __construct(Dimension $dimension){
+		$this->levelId = $dimension->getLevel()->getId();
+		$this->dimensionId = $dimension->getSaveId();
 	}
 
 	public function onRun(){
-		$this->saveToThreadStore("generation.level{$this->levelId}.manager", null);
-		$this->saveToThreadStore("generation.level{$this->levelId}.generator", null);
+		$this->saveToThreadStore("generation.level{$this->levelId}:{$this->dimensionId}.manager", null);
+		$this->saveToThreadStore("generation.level{$this->levelId}:{$this->dimensionId}.generator", null);
 	}
 }

@@ -65,6 +65,7 @@ use pocketmine\event\player\PlayerInteractEvent;
 use pocketmine\event\Timings;
 use pocketmine\inventory\InventoryHolder;
 use pocketmine\item\Item;
+use pocketmine\level\dimension\Dimension;
 use pocketmine\level\format\Chunk;
 use pocketmine\level\format\generic\BaseLevelProvider;
 use pocketmine\level\format\LevelProvider;
@@ -110,7 +111,7 @@ use pocketmine\utils\ReversePriorityQueue;
 
 #include <rules/Level.h>
 
-class Level implements ChunkManager, Metadatable{
+class Level implements Metadatable{
 
 	private static $levelIdCounter = 1;
 	private static $chunkLoaderCounter = 1;
@@ -157,13 +158,16 @@ class Level implements ChunkManager, Metadatable{
 	private $cacheChunks = false;
 
 	/** @var Server */
-	public $server;
+	private $server;
 
 	/** @var int */
 	private $levelId;
 
 	/** @var LevelProvider */
 	private $provider;
+
+	/** @var Dimension */
+	private $dimensions = [];
 
 	/** @var ChunkLoader[] */
 	private $loaders = [];
@@ -312,10 +316,11 @@ class Level implements ChunkManager, Metadatable{
 	 * @param string $name
 	 * @param string $path
 	 * @param string $provider Class that extends LevelProvider
+	 * @param int    $defaultDimensionId
 	 *
 	 * @throws \Exception
 	 */
-	public function __construct(Server $server, string $name, string $path, string $provider){
+	public function __construct(Server $server, string $name, string $path, string $provider, int $defaultDimensionId = Dimension::ID_OVERWORLD){
 		$this->blockStates = Block::$fullList;
 		$this->levelId = static::$levelIdCounter++;
 		$this->blockMetadata = new BlockMetadataStore($this);
@@ -330,7 +335,12 @@ class Level implements ChunkManager, Metadatable{
 			throw new LevelException("Provider is not a subclass of LevelProvider");
 		}
 		$this->server->getLogger()->info($this->server->getLanguage()->translateString("pocketmine.level.preparing", [$this->provider->getName()]));
-		$this->generator = Generator::getGenerator($this->provider->getGenerator());
+
+		$this->dimensions = [];
+		$this->defaultDimensionId = $defaultDimensionId;
+		if(!$this->loadDimension($this->defaultDimensionId)){
+			throw new LevelException("Could not load default dimension");
+		}
 
 		$this->folderName = $name;
 		$this->updateQueue = new ReversePriorityQueue();
@@ -363,28 +373,6 @@ class Level implements ChunkManager, Metadatable{
 		$this->tickRate = $tickRate;
 	}
 
-	public function initLevel(){
-		$generator = $this->generator;
-		$this->generatorInstance = new $generator($this->provider->getGeneratorOptions());
-		$this->generatorInstance->init($this, new Random($this->getSeed()));
-
-		$this->registerGenerator();
-	}
-
-	public function registerGenerator(){
-		$size = $this->server->getScheduler()->getAsyncTaskPoolSize();
-		for($i = 0; $i < $size; ++$i){
-			$this->server->getScheduler()->scheduleAsyncTaskToWorker(new GeneratorRegisterTask($this, $this->generatorInstance), $i);
-		}
-	}
-
-	public function unregisterGenerator(){
-		$size = $this->server->getScheduler()->getAsyncTaskPoolSize();
-		for($i = 0; $i < $size; ++$i){
-			$this->server->getScheduler()->scheduleAsyncTaskToWorker(new GeneratorUnregisterTask($this, $this->generatorInstance), $i);
-		}
-	}
-
 	public function getBlockMetadata() : BlockMetadataStore{
 		return $this->blockMetadata;
 	}
@@ -413,8 +401,6 @@ class Level implements ChunkManager, Metadatable{
 		foreach($this->chunks as $chunk){
 			$this->unloadChunk($chunk->getX(), $chunk->getZ(), false);
 		}
-
-		$this->unregisterGenerator();
 
 		$this->provider->close();
 		$this->provider = null;
@@ -477,6 +463,103 @@ class Level implements ChunkManager, Metadatable{
 
 	public function setAutoSave(bool $value){
 		$this->autoSave = $value;
+	}
+
+	/**
+	 * Returns the dimension with the specified ID, or null if it is not loaded.
+	 * @since API 3.0.0
+	 *
+	 * @param int $id
+	 *
+	 * @return Dimension|null
+	 */
+	public function getDimension(int $id){
+		return $this->dimensions[$id] ?? null;
+	}
+
+	/**
+	 * Returns the level's default dimension, usually the Overworld. This is where players will spawn when transferred from another level to this one.
+	 * @since API 3.0.0
+	 *
+	 * @return Dimension
+	 */
+	public function getDefaultDimension() : Dimension{
+		return $this->dimensions[$this->defaultDimensionId];
+	}
+
+	/**
+	 * Changes the level default dimension to the one with the specified ID.
+	 * @since API 3.0.0
+	 *
+	 * @param int $id
+	 * @param bool $load whether to try and load the dimension if it isn't already loaded
+	 *
+	 * @return bool indication of success
+	 */
+	public function setDefaultDimension(int $id, bool $load = false) : bool{
+		if(!isset($this->dimensions[$id]) and (!$load or ($load and !$this->loadDimension($id)))){
+			return false;
+		}
+
+		$this->defaultDimensionId = $id;
+		return true;
+	}
+
+	/**
+	 * Loads a dimension into the level index.
+	 * @since API 3.0.0
+	 *
+	 * @param int $id
+	 *
+	 * @return bool indication of success
+	 */
+	public function loadDimension(int $id) : bool{
+		if(isset($this->dimensions[$id])){
+			return true;
+		}
+
+		//$this->server->getPluginManager()->callEvent($ev = new DimensionLoadEvent($this, $id));
+		//if(!$ev->isCancelled()){
+			if(($dim = Dimension::createDimension($this, $id)) instanceof Dimension){
+				$this->dimensions[$id] = $dim;
+				return true;
+			}
+		//}
+
+		return false;
+	}
+
+	/**
+	 * Unloads a dimension from the dimension index.
+	 * @since API 3.0.0
+	 *
+	 * @param int $id the ID of the dimension to unload
+	 * @param bool $save
+	 * @param bool $force Whether to unload regardless of whether it is the default dimension or is currently in use.
+	 *
+	 * @return bool indication of success
+	 */
+	public function unloadDimension(int $id, bool $save = true, bool $force = false) : bool{
+		if(!isset($this->dimensions[$id]) or ($this->dimensions[$id]->isInUse() and !$force) or $id = $this->defaultDimensionId){
+			return false;
+		}
+
+		//$this->server->getPluginManager()->callEvent($ev = new DimensionUnloadEvent($this, $id));
+		//if(!$ev->isCancelled()){
+			$dimension = $this->dimensions[$id];
+			if($save){
+				$dimension->saveAll();
+			}
+
+			foreach($dimension->getPlayers() as $player){
+
+			}
+
+			unset($this->dimensions[$id]);
+			return true;
+		//}
+
+		return false;
 	}
 
 	/**

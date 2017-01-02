@@ -50,6 +50,7 @@ use pocketmine\inventory\ShapelessRecipe;
 use pocketmine\item\enchantment\Enchantment;
 use pocketmine\item\Item;
 use pocketmine\lang\BaseLang;
+use pocketmine\level\dimension\Dimension;
 use pocketmine\level\format\leveldb\LevelDB;
 use pocketmine\level\format\LevelProviderManager;
 use pocketmine\level\format\region\Anvil;
@@ -973,8 +974,6 @@ class Server{
 
 		$this->levels[$level->getId()] = $level;
 
-		$level->initLevel();
-
 		$this->getPluginManager()->callEvent(new LevelLoadEvent($level));
 
 		$level->setTickRate($this->baseTickRate);
@@ -1018,8 +1017,6 @@ class Server{
 
 			$level = new Level($this, $name, $path, $provider);
 			$this->levels[$level->getId()] = $level;
-
-			$level->initLevel();
 
 			$level->setTickRate($this->baseTickRate);
 		}catch(\Throwable $e){
@@ -1495,6 +1492,7 @@ class Server{
 			Biome::init();
 			Effect::init();
 			Attribute::init();
+			Dimension::init();
 			$this->craftingManager = new CraftingManager();
 
 			$this->pluginManager = new PluginManager($this, $this->commandMap);

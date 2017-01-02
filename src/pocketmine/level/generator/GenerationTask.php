@@ -21,9 +21,9 @@
 
 namespace pocketmine\level\generator;
 
+use pocketmine\level\dimension\Dimension;
 use pocketmine\level\format\Chunk;
 use pocketmine\level\format\generic\GenericChunk;
-use pocketmine\level\Level;
 use pocketmine\level\SimpleChunkManager;
 use pocketmine\scheduler\AsyncTask;
 use pocketmine\Server;
@@ -32,19 +32,22 @@ class GenerationTask extends AsyncTask{
 
 	public $state;
 	public $levelId;
+	public $dimensionId;
+	public $saveId;
 	public $chunk;
 
-	public function __construct(Level $level, Chunk $chunk){
+	public function __construct(Dimension $dimension, Chunk $chunk){
 		$this->state = true;
-		$this->levelId = $level->getId();
+		$this->levelId = $dimension->getLevel()->getId();
+		$this->dimensionId = $dimension->getSaveId();
 		$this->chunk = $chunk->fastSerialize();
 	}
 
 	public function onRun(){
 		/** @var SimpleChunkManager $manager */
-		$manager = $this->getFromThreadStore("generation.level{$this->levelId}.manager");
+		$manager = $this->getFromThreadStore("generation.level{$this->levelId}:{$this->dimensionId}.manager");
 		/** @var Generator $generator */
-		$generator = $this->getFromThreadStore("generation.level{$this->levelId}.generator");
+		$generator = $this->getFromThreadStore("generation.level{$this->levelId}:{$this->dimensionId}.generator");
 		if($manager === null or $generator === null){
 			$this->state = false;
 			return;
@@ -71,17 +74,21 @@ class GenerationTask extends AsyncTask{
 	public function onCompletion(Server $server){
 		$level = $server->getLevel($this->levelId);
 		if($level !== null){
-			if($this->state === false){
-				$level->registerGenerator();
-				return;
+			$dimension = $level->getDimension($this->dimensionId);
+			if($dimension !== null){
+				if($this->state === false){
+					$dimension->registerGenerator();
+					return;
+				}
+
+				/** @var Chunk $chunk */
+				$chunk = GenericChunk::fastDeserialize($this->chunk, $level->getProvider());
+				if($chunk === null){
+					//TODO error
+					return;
+				}
+				$dimension->generateChunkCallback($chunk->getX(), $chunk->getZ(), $chunk);
 			}
-			/** @var Chunk $chunk */
-			$chunk = GenericChunk::fastDeserialize($this->chunk, $level->getProvider());
-			if($chunk === null){
-				//TODO error
-				return;
-			}
-			$level->generateChunkCallback($chunk->getX(), $chunk->getZ(), $chunk);
 		}
 	}
 }

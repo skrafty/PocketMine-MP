@@ -21,9 +21,9 @@
 
 namespace pocketmine\level\generator;
 
+use pocketmine\level\dimension\Dimension;
 use pocketmine\level\format\Chunk;
 use pocketmine\level\format\generic\GenericChunk;
-use pocketmine\level\Level;
 use pocketmine\level\SimpleChunkManager;
 use pocketmine\scheduler\AsyncTask;
 use pocketmine\Server;
@@ -32,6 +32,7 @@ class PopulationTask extends AsyncTask{
 
 	public $state;
 	public $levelId;
+	public $dimensionId;
 	public $chunk;
 
 	public $chunk0;
@@ -44,10 +45,12 @@ class PopulationTask extends AsyncTask{
 	public $chunk7;
 	public $chunk8;
 
-	public function __construct(Level $level, Chunk $chunk){
+	public function __construct(Dimension $dimension, Chunk $chunk){
 		$this->state = true;
-		$this->levelId = $level->getId();
+		$this->levelId = $dimension->getLevel()->getId();
+		$this->dimensionId = $dimension->getSaveId();
 		$this->chunk = $chunk->fastSerialize();
+
 
 		for($i = 0; $i < 9; ++$i){
 			if($i === 4){
@@ -55,16 +58,16 @@ class PopulationTask extends AsyncTask{
 			}
 			$xx = -1 + $i % 3;
 			$zz = -1 + (int) ($i / 3);
-			$ck = $level->getChunk($chunk->getX() + $xx, $chunk->getZ() + $zz, false);
+			$ck = $dimension->getChunk($chunk->getX() + $xx, $chunk->getZ() + $zz, false);
 			$this->{"chunk$i"} = $ck !== null ? $ck->fastSerialize() : null;
 		}
 	}
 
 	public function onRun(){
 		/** @var SimpleChunkManager $manager */
-		$manager = $this->getFromThreadStore("generation.level{$this->levelId}.manager");
+		$manager = $this->getFromThreadStore("generation.level{$this->levelId}:{$this->dimensionId}.manager");
 		/** @var Generator $generator */
-		$generator = $this->getFromThreadStore("generation.level{$this->levelId}.generator");
+		$generator = $this->getFromThreadStore("generation.level{$this->levelId}:{$this->dimensionId}.generator");
 		if($manager === null or $generator === null){
 			$this->state = false;
 			return;
@@ -148,30 +151,33 @@ class PopulationTask extends AsyncTask{
 	public function onCompletion(Server $server){
 		$level = $server->getLevel($this->levelId);
 		if($level !== null){
-			if($this->state === false){
-				$level->registerGenerator();
-				return;
-			}
-
-			$chunk = GenericChunk::fastDeserialize($this->chunk, $level->getProvider());
-
-			if($chunk === null){
-				//TODO error
-				return;
-			}
-
-			for($i = 0; $i < 9; ++$i){
-				if($i === 4){
-					continue;
+			$dimension = $level->getDimension($this->dimensionId);
+			if($dimension !== null){
+				if($this->state === false){
+					$dimension->registerGenerator();
+					return;
 				}
-				$c = $this->{"chunk$i"};
-				if($c !== null){
-					$c = GenericChunk::fastDeserialize($c, $level->getProvider());
-					$level->generateChunkCallback($c->getX(), $c->getZ(), $c);
-				}
-			}
 
-			$level->generateChunkCallback($chunk->getX(), $chunk->getZ(), $chunk);
+				$chunk = GenericChunk::fastDeserialize($this->chunk, $level->getProvider());
+
+				if($chunk === null){
+					//TODO error
+					return;
+				}
+
+				for($i = 0; $i < 9; ++$i){
+					if($i === 4){
+						continue;
+					}
+					$c = $this->{"chunk$i"};
+					if($c !== null){
+						$c = GenericChunk::fastDeserialize($c, $level->getProvider());
+						$dimension->generateChunkCallback($c->getX(), $c->getZ(), $c);
+					}
+				}
+
+				$dimension->generateChunkCallback($chunk->getX(), $chunk->getZ(), $chunk);
+			}
 		}
 	}
 }

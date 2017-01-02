@@ -25,11 +25,13 @@ namespace pocketmine\level\dimension\vanilla;
 
 use pocketmine\level\dimension\Dimension;
 use pocketmine\level\dimension\DimensionType;
+use pocketmine\level\Level;
+use pocketmine\network\protocol\ChangeDimensionPacket;
 
 class Overworld extends Dimension{
 
-	public function __construct(){
-		parent::__construct(DimensionType::OVERWORLD);
+	protected function __construct(Level $level, int $saveId){
+		parent::__construct($level, $saveId, ChangeDimensionPacket::DIMENSION_OVERWORLD, $level->getProvider()->getGenerator());
 	}
 
 	public function getDimensionName() : string{

@@ -24,13 +24,20 @@ declare(strict_types = 1);
 namespace pocketmine\level\dimension;
 
 use pocketmine\entity\Entity;
+use pocketmine\event\block\BlockUpdateEvent;
 use pocketmine\level\dimension\vanilla\{
 	Overworld,
 	Nether,
 	TheEnd
 };
+use pocketmine\level\ChunkManager;
 use pocketmine\level\format\Chunk;
 use pocketmine\level\format\generic\GenericChunk;
+use pocketmine\level\generator\{
+	Generator,
+	GeneratorRegisterTask,
+	GeneratorUnregisterTask
+};
 use pocketmine\level\Level;
 use pocketmine\math\Vector3;
 use pocketmine\network\protocol\{
@@ -41,12 +48,13 @@ use pocketmine\network\protocol\{
 use pocketmine\Player;
 use pocketmine\Server;
 use pocketmine\tile\Tile;
+use pocketmine\utils\Random;
 
 /**
  * Base Dimension class
  * @since API 3.0.0
  */
-abstract class Dimension{
+abstract class Dimension implements ChunkManager{
 
 	const ID_RESERVED = -1;
 	const ID_OVERWORLD = 0;
@@ -61,6 +69,7 @@ abstract class Dimension{
 	 * @internal
 	 */
 	public static function init(){
+		DimensionType::init();
 		self::$registeredDimensions = [
 			Dimension::ID_OVERWORLD => [Overworld::class, ChangeDimensionPacket::DIMENSION_OVERWORLD],
 			Dimension::ID_NETHER    => [Nether::class,    ChangeDimensionPacket::DIMENSION_NETHER],
@@ -125,6 +134,8 @@ abstract class Dimension{
 	protected $dimensionType;
 	/** @var int */
 	protected $saveId;
+	/** @var string */
+	protected $generatorClass;
 
 	/** @var Chunk[] */
 	protected $chunks = [];
@@ -161,13 +172,14 @@ abstract class Dimension{
 	/**
 	 * @internal
 	 *
-	 * @param Level $level
-	 * @param int   $saveId
-	 * @param int   $networkId
+	 * @param Level  $level
+	 * @param int    $saveId
+	 * @param int    $networkId
+	 * @param string $generatorName
 	 *
 	 * @throws \InvalidArgumentException
 	 */
-	protected function __construct(Level $level, int $saveId, int $networkId = ChangeDimensionPacket::DIMENSION_OVERWORLD){
+	protected function __construct(Level $level, int $saveId, int $networkId = ChangeDimensionPacket::DIMENSION_OVERWORLD, string $generatorName = "DEFAULT"){
 		$this->level = $level;
 		$this->saveId = $saveId;
 		if(($type = DimensionType::get($networkId)) instanceof DimensionType){
@@ -175,6 +187,12 @@ abstract class Dimension{
 		}else{
 			throw new \InvalidArgumentException("Unknown dimension network ID $networkId given");
 		}
+
+		$this->generatorClass = Generator::getGenerator($generatorName);
+		$generator = $this->generatorClass;
+		$this->generatorInstance = new $generator($this->level->getProvider()->getGeneratorOptions());
+		$this->generatorInstance->init($this, new Random($this->level->getSeed()));
+		$this->registerGenerator();
 	}
 
 	/**
@@ -229,6 +247,38 @@ abstract class Dimension{
 	abstract public function getDimensionName() : string;
 
 	/**
+	 * Returns the fully qualified class name of the generator used for this dimension.
+	 * @since API 3.0.0
+	 *
+	 * @return string
+	 */
+	public function getGenerator() : string{
+		return $this->generatorClass;
+	}
+
+	/**
+	 * Registers the generator to all AsyncWorkers for async chunk generation.
+	 * @internal
+	 */
+	public function registerGenerator(){
+		$size = $this->level->getServer()->getScheduler()->getAsyncTaskPoolSize();
+		for($i = 0; $i < $size; ++$i){
+			$this->level->getServer()->getScheduler()->scheduleAsyncTaskToWorker(new GeneratorRegisterTask($this, $this->generatorInstance), $i);
+		}
+	}
+
+	/**
+	 * Unregisters the generator from all AsyncWorkers
+	 * @internal
+	 */
+	public function unregisterGenerator(){
+		$size = $this->level->getServer()->getScheduler()->getAsyncTaskPoolSize();
+		for($i = 0; $i < $size; ++$i){
+			$this->level->getServer()->getScheduler()->scheduleAsyncTaskToWorker(new GeneratorUnregisterTask($this), $i);
+		}
+	}
+
+	/**
 	 * Returns the horizontal (X/Z) of 1 block in this dimension compared to the Overworld.
 	 * This is used to calculate positions for entities transported between dimensions.
 	 *
@@ -259,6 +309,16 @@ abstract class Dimension{
 	 */
 	public function getPlayers() : array{
 		return $this->players;
+	}
+
+	/**
+	 * Returns whether there are currently players in this dimension or not.
+	 * @since API 3.0.0
+	 *
+	 * @return bool
+	 */
+	public function isInUse() : bool{
+		return count($this->players) > 0;
 	}
 
 	/**
@@ -470,15 +530,19 @@ abstract class Dimension{
 	 *
 	 * @return Chunk|null
 	 */
-	public function getChunk(int $x, int $z, bool $generate = false){
+	public function getChunk(int $chunkX, int $chunkZ, bool $generate = false){
 		//TODO: alter this to handle asynchronous chunk loading
-		if(isset($this->chunks[$index = Level::chunkHash($x, $z)])){
+		if(isset($this->chunks[$index = Level::chunkHash($chunkX, $chunkZ)])){
 			return $this->chunks[$index];
-		}elseif($this->loadChunk($x, $z, $generate)){
+		}elseif($this->loadChunk($chunkX, $chunkZ, $generate)){
 			return $this->chunks[$index];
 		}
 
 		return null;
+	}
+
+	public function setChunk(int $chunkX, int $chunkZ, Chunk $chunk = null){
+		//TODO
 	}
 
 	/**
@@ -623,7 +687,7 @@ abstract class Dimension{
 			if($update === true){
 				$this->updateAllLight($block);
 
-				$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($block));
+				$this->level->getServer()->getPluginManager()->callEvent($ev = new BlockUpdateEvent($block));
 				if(!$ev->isCancelled()){
 					$evBlock = $ev->getBlock();
 					foreach($this->getNearbyEntities(new AxisAlignedBB($evBlock->x - 1, $evBlock->y - 1, $evBlock->z - 1, $evBlock->x + 1, $evBlock->y + 1, $evBlock->z + 1)) as $entity){
@@ -643,6 +707,8 @@ abstract class Dimension{
 	/**
 	 * Returns the maximum lighting available at the specified Vector3 position.
 	 * @since API 3.0.0
+	 *
+	 * @param Vector3 $pos
 	 *
 	 * @return int 0-15
 	 */
@@ -671,7 +737,7 @@ abstract class Dimension{
 			}
 		}
 
-		return 15;
+		return $this->dimensionType->hasSkyLight() ? 15 : 0;
 	}
 
 	/**
@@ -908,32 +974,32 @@ abstract class Dimension{
 	public function updateBlocksAround(Vector3 $pos){
 		$pos = $pos->floor();
 
-		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y - 1, $pos->z)));
+		$this->level->getServer()->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y - 1, $pos->z)));
 		if(!$ev->isCancelled()){
 			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
 		}
 
-		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y + 1, $pos->z)));
+		$this->level->getServer()->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y + 1, $pos->z)));
 		if(!$ev->isCancelled()){
 			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
 		}
 
-		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x - 1, $pos->y, $pos->z)));
+		$this->level->getServer()->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x - 1, $pos->y, $pos->z)));
 		if(!$ev->isCancelled()){
 			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
 		}
 
-		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x + 1, $pos->y, $pos->z)));
+		$this->level->getServer()->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x + 1, $pos->y, $pos->z)));
 		if(!$ev->isCancelled()){
 			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
 		}
 
-		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y, $pos->z - 1)));
+		$this->level->getServer()->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y, $pos->z - 1)));
 		if(!$ev->isCancelled()){
 			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
 		}
 
-		$this->level->server->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y, $pos->z + 1)));
+		$this->level->getServer()->getPluginManager()->callEvent($ev = new BlockUpdateEvent($this->getBlockAt($pos->x, $pos->y, $pos->z + 1)));
 		if(!$ev->isCancelled()){
 			$ev->getBlock()->onUpdate(self::BLOCK_UPDATE_NORMAL);
 		}
@@ -974,17 +1040,19 @@ abstract class Dimension{
 	 * Sets the rain level and sends changes to players.
 	 * @since API 3.0.0
 	 *
-	 * @param int $level
+	 * @param int  $level
+	 * @param bool $send
 	 */
-	public function setRainLevel(int $level){
-		//TODO
+	public function setRainLevel(int $level, bool $send = true){
+		$this->rainLevel = $level;
+		$this->sendWeather();
 	}
 
 	/**
 	 * Sends weather changes to the specified targets, or to all players in the dimension if not specified.
 	 * @since API 3.0.0
 	 *
-	 * @param Player $targets,...
+	 * @param Player ...$targets
 	 */
 	public function sendWeather(Player ...$targets){
 		$rain = new LevelEventPacket();
@@ -1003,12 +1071,13 @@ abstract class Dimension{
 			$thunder->evid = LevelEventPacket::EVENT_STOP_THUNDER;
 		}
 
+		$server = $this->level->getServer();
 		if(count($targets) === 0){
-			Server::broadcastPacket($this->players, $rain);
-			Server::broadcastPacket($this->players, $thunder);
+			$server->broadcastPacket($this->players, $rain);
+			$server->broadcastPacket($this->players, $thunder);
 		}else{
-			Server::broadcastPacket($targets, $rain);
-			Server::broadcastPacket($targets, $thunder);
+			$server->broadcastPacket($targets, $rain);
+			$server->broadcastPacket($targets, $thunder);
 		}
 	}
 
@@ -1020,7 +1089,7 @@ abstract class Dimension{
 	 * @param int        $chunkZ
 	 * @param DataPacket $packet
 	 */
-	public function addChunkPacket(int $x, int $z, $packet){
+	public function addChunkPacket(int $chunkX, int $chunkZ, $packet){
 		if(!isset($this->chunkPackets[$index = Level::chunkHash($chunkX, $chunkZ)])){
 			$this->chunkPackets[$index] = [$packet];
 		}else{

@@ -25,11 +25,13 @@ namespace pocketmine\level\dimension\vanilla;
 
 use pocketmine\level\dimension\Dimension;
 use pocketmine\level\dimension\DimensionType;
+use pocketmine\level\Level;
+use pocketmine\network\protocol\ChangeDimensionPacket;
 
 class Nether extends Dimension{
 
-	public function __construct(){
-		parent::__construct(DimensionType::NETHER);
+	protected function __construct(Level $level, int $saveId){
+		parent::__construct($level, $saveId, ChangeDimensionPacket::DIMENSION_NETHER, "HELL");
 	}
 
 	public function getDimensionName() : string{

@@ -53,7 +53,7 @@ class Position extends Vector3{
 		return $this->level;
 	}
 
-	public function setLevel(Level $level){
+	public function setLevel(Level $level = null){
 		$this->level = $level;
 		return $this;
 	}
@@ -64,7 +64,17 @@ class Position extends Vector3{
 	 * @return bool
 	 */
 	public function isValid(){
-		return $this->getLevel() instanceof Level;
+		if($this->level instanceof Level){
+			if($this->level->isClosed()){
+				assert(false, $this->__toString() . " is holding a reference to an unloaded level");
+				$this->level = null;
+				return false;
+			}
+
+			return true;
+		}
+
+		return false;
 	}
 
 	/**

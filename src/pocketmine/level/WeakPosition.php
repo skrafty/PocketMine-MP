@@ -51,9 +51,13 @@ class WeakPosition extends Position{
 		return Server::getInstance()->getLevel($this->levelId);
 	}
 
-	public function setLevel(Level $level){
+	public function setLevel(Level $level = null){
 		$this->levelId = ($level !== null ? $level->getId() : -1);
 		return $this;
+	}
+
+	public function isValid() : bool{
+		return $this->getLevel() instanceof Level;
 	}
 
 	/**
